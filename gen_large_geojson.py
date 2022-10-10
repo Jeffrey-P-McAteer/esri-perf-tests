@@ -121,8 +121,19 @@ class FileGDB_API():
       )
 
     self._FileGDB_API = ctypes.CDLL(lib_full_path, mode=ctypes.RTLD_GLOBAL)
+    #print(f'{self.lib_name} loaded as {self._FileGDB_API}')
 
-    print(f'{self.lib_name} loaded as {self._FileGDB_API}')
+    # Define some C++-specific functions which are needed to construct native objects
+    #self._FileGDB_API.Geodatabase_new = getattr(self._FileGDB_API, '_ZN10FileGDBAPI11GeodatabaseC1Ev')
+    self._FileGDB_API.Geodatabase_new = getattr(self._FileGDB_API, '_ZN10FileGDBAPI11GeodatabaseC2Ev')
+    self._FileGDB_API.Geodatabase_new.argtypes = [ctypes.c_void_p, ]
+    self._FileGDB_API.Geodatabase_new.restype = ctypes.c_void_p
+
+    self.gdb_native_class_memory = ctypes.create_string_buffer(b"", 16 * 1024) # I just kinda assume 16kb will cover all the reads/writes Esri needs. Bump if segfaults observed.
+
+    self._this = ctypes.c_void_p( self._FileGDB_API.Geodatabase_new( ctypes.byref(self.gdb_native_class_memory) ) ) # Geodatabase pointer from c++ land
+    print(f'self._this={self._this}')
+    
 
 
   def read(self):
@@ -130,8 +141,42 @@ class FileGDB_API():
 
   def write(self, geodataframe):
     print(f'geodataframe={geodataframe}')
-    
-    return None
+    # Use nm -D /tmp/esri/FileGDB_API_RHEL7_64/lib/libFileGDBAPI.so | grep 'CreateGeodatabase'
+    # to dump functions discovered via header files; -_-
+    # Also useful: http://demangler.com/
+    lib_create_fn = getattr(self._FileGDB_API, '_ZN10FileGDBAPI17CreateGeodatabaseERKSbIwSt11char_traitsIwESaIwEERNS_11GeodatabaseE') # (wchar string, &Geodatabase)
+    lib_create_fn.argtypes = [
+      ctypes.POINTER(ctypes.c_void_p),
+      ctypes.POINTER(ctypes.c_wchar_p),
+    ]
+    lib_create_fn.restype = ctypes.c_void_p
+    print(f'lib_create_fn={lib_create_fn}')
+    lib_open_fn = getattr(self._FileGDB_API, '_ZN10FileGDBAPI15OpenGeodatabaseERKSbIwSt11char_traitsIwESaIwEERNS_11GeodatabaseE') # (wchar string, &Geodatabase)
+    lib_open_fn.argtypes = [
+      ctypes.POINTER(ctypes.c_void_p),
+      ctypes.POINTER(ctypes.c_wchar_p),
+    ]
+    lib_open_fn.restype = ctypes.c_void_p
+    print(f'lib_open_fn={lib_open_fn}')
+
+    gdb_path_c_wchar_p = ctypes.c_wchar_p(self.gdb_directory_path)
+    print(f'gdb_path_c_wchar_p={gdb_path_c_wchar_p}')
+    if not os.path.exists(self.gdb_directory_path):
+      res = lib_create_fn(self._this, gdb_path_c_wchar_p)
+      print(f'lib_create_fn res={res}')
+
+    # Now we know it exists, open it
+    lib_open_fn(self._this, gdb_path_c_wchar_p)
+    print(f'Opened at {gdb_path_c_wchar_p}, {self._this}')
+
+
+
+  def close(self):
+    if not self.gdb_native_handle is None:
+      self.gdb_native_handle = None
+
+    self.gdb_native_handle = None
+
 
 # python -m pip install --user geojson
 import geojson
@@ -145,7 +190,7 @@ import fiona # Also dependency of geopandas, used to query file geodatabase driv
 from linetimer import CodeTimer
 
 #num_to_gen = 1000000
-num_to_gen = 100000
+num_to_gen = 1000
 geojson_file = '/mnt/scratch/data.geojson'
 geofeather_lz4_file = '/mnt/scratch/data.geofeather.lz4'
 geofeather_zstd_file = '/mnt/scratch/data.geofeather.zstd'
@@ -212,7 +257,7 @@ with CodeTimer(f'Convert {geojson_file} to {file_gdb_dirname}', unit='s'):
   with CodeTimer(f'Read {geojson_file}', unit='s'):
     geodata = geopandas.read_file(geojson_file)
   #print(f'geodata={geodata}')
-  with fiona.drivers():
+  with fiona.Env():
     print(f'fiona.supported_drivers={fiona.supported_drivers}')
     fgdb_driver_name = None
     try:
